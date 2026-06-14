@@ -753,3 +753,138 @@ class TestFieldPreAndPostLoad:
             match="The 'post_load' parameter must be a callable or an iterable of callables.",
         ):
             fields.Int(post_load="not_callable")  # type: ignore[arg-type]
+
+
+class TestPhoneNumberField:
+    """Tests for ``fields.PhoneNumber`` and ``validate.Phone``."""
+
+    # -- Deserialization: valid formats ---------------------------------------
+
+    def test_deserialize_valid_e164(self):
+        field = fields.PhoneNumber()
+        # E.164 with Chinese country code
+        assert field.deserialize("+8613800138000") == "+8613800138000"
+
+    def test_deserialize_valid_e164_other_country(self):
+        field = fields.PhoneNumber()
+        # E.164 with US country code (7-15 digits after +)
+        assert field.deserialize("+12025551234") == "+12025551234"
+
+    def test_deserialize_valid_national_china(self):
+        field = fields.PhoneNumber()
+        # National Chinese format: 11 digits starting with 1.
+        # Should be auto-prefixed with +86.
+        assert field.deserialize("13800138000") == "+8613800138000"
+
+    # -- Deserialization: stripping whitespace and symbols --------------------
+
+    def test_deserialize_strips_spaces(self):
+        field = fields.PhoneNumber()
+        assert field.deserialize("+86 138 0013 8000") == "+8613800138000"
+
+    def test_deserialize_strips_hyphens(self):
+        field = fields.PhoneNumber()
+        assert field.deserialize("+86-138-0013-8000") == "+8613800138000"
+
+    def test_deserialize_strips_parentheses(self):
+        field = fields.PhoneNumber()
+        assert field.deserialize("(138)00138000") == "+8613800138000"
+
+    def test_deserialize_strips_mixed_formatting(self):
+        field = fields.PhoneNumber()
+        assert field.deserialize("+86 138-0013-8000") == "+8613800138000"
+
+    def test_deserialize_national_with_formatting(self):
+        field = fields.PhoneNumber()
+        assert field.deserialize("138 0013 8000") == "+8613800138000"
+
+    # -- Deserialization: invalid formats ------------------------------------
+
+    def test_deserialize_invalid_too_short(self):
+        field = fields.PhoneNumber()
+        with pytest.raises(ValidationError):
+            field.deserialize("+861234")  # too few digits
+
+    def test_deserialize_invalid_too_long(self):
+        field = fields.PhoneNumber()
+        with pytest.raises(ValidationError):
+            field.deserialize("+8613800138000123456")  # too many digits
+
+    def test_deserialize_invalid_contains_letters(self):
+        field = fields.PhoneNumber()
+        with pytest.raises(ValidationError):
+            field.deserialize("+86abc138000")
+
+    def test_deserialize_invalid_national_wrong_prefix(self):
+        field = fields.PhoneNumber()
+        with pytest.raises(ValidationError):
+            field.deserialize("23800138000")  # must start with 1
+
+    def test_deserialize_invalid_national_wrong_length(self):
+        field = fields.PhoneNumber()
+        with pytest.raises(ValidationError):
+            field.deserialize("1380013800")  # 10 digits instead of 11
+
+    def test_deserialize_invalid_not_a_string(self):
+        field = fields.PhoneNumber()
+        with pytest.raises(ValidationError):
+            field.deserialize(13800138000)
+
+    # -- Serialization: format parameter -------------------------------------
+
+    def test_serialize_e164_format(self):
+        field = fields.PhoneNumber(format="e164")
+        # Input stored in national form should be normalized to E.164
+        assert field.serialize("phone", {"phone": "13800138000"}) == "+8613800138000"
+
+    def test_serialize_e164_already_e164(self):
+        field = fields.PhoneNumber(format="e164")
+        assert field.serialize("phone", {"phone": "+8613800138000"}) == "+8613800138000"
+
+    def test_serialize_national_format(self):
+        field = fields.PhoneNumber(format="national")
+        assert field.serialize("phone", {"phone": "+8613800138000"}) == "138 0013 8000"
+
+    def test_serialize_national_from_national_input(self):
+        field = fields.PhoneNumber(format="national")
+        assert field.serialize("phone", {"phone": "13800138000"}) == "138 0013 8000"
+
+    def test_serialize_no_format(self):
+        field = fields.PhoneNumber()
+        # Without format, the value is returned as-is
+        assert field.serialize("phone", {"phone": "13800138000"}) == "13800138000"
+        assert (
+            field.serialize("phone", {"phone": "+8613800138000"})
+            == "+8613800138000"
+        )
+
+    def test_serialize_none_returns_none(self):
+        field = fields.PhoneNumber(format="e164", allow_none=True)
+        assert field.serialize("phone", {"phone": None}) is None
+
+    # -- Error messages ------------------------------------------------------
+
+    def test_custom_error_message(self):
+        field = fields.PhoneNumber(error_messages={"invalid": "Bad phone!"})
+        with pytest.raises(ValidationError, match="Bad phone!"):
+            field.deserialize("not-a-number")
+
+    def test_default_invalid_error_message(self):
+        field = fields.PhoneNumber()
+        with pytest.raises(ValidationError, match="Not a valid phone number."):
+            field.deserialize("abc")
+
+    # -- Region parameter ----------------------------------------------------
+
+    def test_invalid_region_raises(self):
+        with pytest.raises(ValidationError, match="Region 'ZZ' is not supported."):
+            fields.PhoneNumber(region="ZZ")
+
+    def test_region_parameter_case_insensitive(self):
+        field = fields.PhoneNumber(region="cn")
+        assert field.region == "CN"
+
+    def test_invalid_format_parameter_raises(self):
+        with pytest.raises(ValueError, match="'format' must be"):
+            fields.PhoneNumber(format="international")
+

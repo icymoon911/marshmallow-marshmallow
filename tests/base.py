@@ -46,6 +46,7 @@ ALL_FIELDS = [
     fields.Dict,
     fields.Url,
     fields.Email,
+    fields.PhoneNumber,
     fields.UUID,
     fields.Decimal,
     fields.IP,

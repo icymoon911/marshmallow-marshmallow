@@ -10,6 +10,7 @@ import email.utils
 import ipaddress
 import math
 import numbers
+import re
 import typing
 import uuid
 from collections.abc import Mapping as _Mapping
@@ -71,6 +72,7 @@ __all__ = [
     "NaiveDateTime",
     "Nested",
     "Number",
+    "PhoneNumber",
     "Pluck",
     "Raw",
     "Str",
@@ -1800,6 +1802,170 @@ class Email(String):
             raise ValueError('"invalid" error message must be a string.')
         validator = validate.Email(error=self.error_messages["invalid"])
         self.validators.insert(0, validator)
+
+
+class PhoneNumber(String):
+    """A phone number field.
+
+    Validates phone numbers in E.164 international format (leading ``+``,
+    7-15 digits) or national format for the configured region. On
+    deserialization, common formatting characters (whitespace, hyphens,
+    parentheses and dots) are stripped before validation.
+
+    On serialization, the output format can be controlled with the ``format``
+    parameter:
+
+    - ``"e164"`` outputs standard international format, e.g. ``+8613800138000``
+    - ``"national"`` outputs national format, e.g. ``138 0013 8000``
+    - ``None`` (the default) outputs the value as-is.
+
+    :param region: Two-letter region code used to interpret national-format
+        numbers and to supply the country calling code when needed. Currently
+        only ``"CN"`` (China) is supported. Defaults to ``"CN"``.
+    :param format: Output format used during serialization. One of ``"e164"``,
+        ``"national"``, or ``None`` for no formatting.
+    :param kwargs: The same keyword arguments that :class:`String` receives.
+    """
+
+    #: Default error messages.
+    default_error_messages = {
+        "invalid": "Not a valid phone number.",
+        "invalid_region": "Region {region!r} is not supported.",
+    }
+
+    # National-format grouping patterns used by the "national" output format.
+    # Each value is a callable that takes the cleaned national digits (no
+    # country code) and returns a formatted string.
+    _NATIONAL_FORMATTERS: dict[str, typing.Callable[[str], str]] = {
+        # China: 1xx xxxx xxxx
+        "CN": lambda digits: f"{digits[:3]} {digits[3:7]} {digits[7:]}"
+        if len(digits) == 11
+        else digits,
+    }
+
+    def __init__(
+        self,
+        *,
+        region: str = "CN",
+        format: str | None = None,  # noqa: A002
+        **kwargs: Unpack[_BaseFieldKwargs],
+    ) -> None:
+        self.region = region.upper()
+        self.format = format
+
+        if format is not None and format not in ("e164", "national"):
+            raise ValueError(
+                f"'format' must be 'e164', 'national', or None, got {format!r}."
+            )
+
+        super().__init__(**kwargs)
+
+        if self.region not in validate.Phone.COUNTRY_CODES:
+            raise self.make_error("invalid_region", region=self.region)
+
+        # Insert phone validator into self.validators so that multiple errors
+        # can be stored.
+        if not isinstance(self.error_messages["invalid"], str):
+            raise ValueError('"invalid" error message must be a string.')
+        validator = validate.Phone(
+            region=self.region, error=self.error_messages["invalid"]
+        )
+        self.validators.insert(0, validator)
+
+    @staticmethod
+    def _clean(value: str) -> str:
+        """Strip whitespace, hyphens, parentheses and dots from *value*."""
+        return re.sub(r"[\s\-\(\)\.]+", "", value)
+
+    def _to_e164(self, cleaned: str) -> str:
+        """Convert a cleaned phone number to E.164 format.
+
+        *cleaned* must already have formatting characters stripped. If it
+        already starts with ``+`` it is returned unchanged, otherwise the
+        country calling code for ``self.region`` is prepended.
+        """
+        if cleaned.startswith("+"):
+            return cleaned
+        country_code = validate.Phone.COUNTRY_CODES[self.region]
+        return f"+{country_code}{cleaned}"
+
+    def _to_national(self, cleaned: str) -> str:
+        """Convert a cleaned phone number to national format.
+
+        Strips the country calling code when present, then applies the
+        region-specific grouping formatter.
+        """
+        if cleaned.startswith("+"):
+            country_code = validate.Phone.COUNTRY_CODES[self.region]
+            prefix = f"+{country_code}"
+            if cleaned.startswith(prefix):
+                cleaned = cleaned[len(prefix):]
+        formatter = self._NATIONAL_FORMATTERS.get(self.region)
+        if formatter is not None:
+            return formatter(cleaned)
+        return cleaned
+
+    def _serialize(self, value, attr, obj, **kwargs) -> str | None:
+        # Delegate basic string conversion to the parent class first
+        value = super()._serialize(value, attr, obj, **kwargs)
+        if value is None:
+            return None
+
+        if self.format is None:
+            return value
+
+        cleaned = self._clean(value)
+
+        if self.format == "e164":
+            return self._to_e164(cleaned)
+        if self.format == "national":
+            return self._to_national(cleaned)
+
+        return value
+
+    def _deserialize(self, value, attr, data, **kwargs) -> str:
+        if not isinstance(value, (str, bytes)):
+            raise self.make_error("invalid")
+        try:
+            value = utils.ensure_text_type(value)
+        except UnicodeDecodeError as error:
+            raise self.make_error("invalid") from error
+
+        # Strip formatting characters before validation so that the
+        # validator sees a clean digit-only (or +digits) string.
+        cleaned = self._clean(value)
+
+        if not cleaned:
+            raise self.make_error("invalid")
+
+        phone_validator = validate.Phone(
+            region=self.region, error=self.error_messages["invalid"]
+        )
+
+        if cleaned.startswith("+"):
+            # Already E.164 — validate directly
+            try:
+                phone_validator(cleaned)
+            except ValidationError as error:
+                raise self.make_error("invalid") from error
+            result = cleaned
+        else:
+            # National format: validate as national first, then convert to E.164
+            if not cleaned.isdigit():
+                raise self.make_error("invalid")
+            national_regex = validate.Phone.NATIONAL_REGEXES.get(self.region)
+            if national_regex is None:
+                raise self.make_error("invalid_region", region=self.region)
+            if not national_regex.match(cleaned):
+                raise self.make_error("invalid")
+            country_code = validate.Phone.COUNTRY_CODES[self.region]
+            result = f"+{country_code}{cleaned}"
+
+        # Run remaining validators (if any) on the normalized value
+        for validator in self.validators[1:]:
+            validator(result)
+
+        return result
 
 
 class IP(Field[ipaddress.IPv4Address | ipaddress.IPv6Address]):

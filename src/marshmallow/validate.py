@@ -300,6 +300,79 @@ class Email(Validator):
         return value
 
 
+class Phone(Validator):
+    """Validate a phone number.
+
+    Supports E.164 international format (leading ``+``, 7-15 digits) and
+    national format for a configurable region (default China: 11 digits
+    starting with ``1``). Whitespace, hyphens, parentheses and dots in the
+    input are stripped before validation.
+
+    :param region: Two-letter region code used to validate national-format
+        numbers when no country code is present. Currently only ``"CN"``
+        (China) is supported. Defaults to ``"CN"``.
+    :param error: Error message to raise in case of a validation error. Can be
+        interpolated with ``{input}``.
+    """
+
+    # E.164: starts with +, followed by 7-15 digits
+    E164_REGEX = re.compile(r"^\+[1-9]\d{6,14}$")
+
+    # National-format regexes keyed by region code
+    NATIONAL_REGEXES: dict[str, re.Pattern[str]] = {
+        # China: 11 digits starting with 1
+        "CN": re.compile(r"^1\d{10}$"),
+    }
+
+    # Country calling codes keyed by region code, used to build E.164 from national
+    COUNTRY_CODES: dict[str, str] = {
+        "CN": "86",
+    }
+
+    default_message = "Not a valid phone number."
+
+    def __init__(self, *, region: str = "CN", error: str | None = None):
+        self.region = region.upper()
+        self.error: str = error or self.default_message
+
+    def _repr_args(self) -> str:
+        return f"region={self.region!r}"
+
+    def _format_error(self, value: str) -> str:
+        return self.error.format(input=value)
+
+    def __call__(self, value: str) -> str:
+        message = self._format_error(value)
+
+        if not isinstance(value, str) or not value:
+            raise ValidationError(message)
+
+        # Strip common formatting characters: whitespace, hyphens, parens, dots
+        cleaned = re.sub(r"[\s\-\(\)\.]+", "", value)
+
+        if not cleaned:
+            raise ValidationError(message)
+
+        # E.164 international format
+        if cleaned.startswith("+"):
+            if self.E164_REGEX.match(cleaned):
+                return value
+            raise ValidationError(message)
+
+        # National format: digits only
+        if not cleaned.isdigit():
+            raise ValidationError(message)
+
+        national_regex = self.NATIONAL_REGEXES.get(self.region)
+        if national_regex is None:
+            raise ValidationError(message)
+
+        if not national_regex.match(cleaned):
+            raise ValidationError(message)
+
+        return value
+
+
 class Range(Validator):
     """Validator which succeeds if the value passed to it is within the specified
     range. If ``min`` is not specified, or is specified as `None`,
