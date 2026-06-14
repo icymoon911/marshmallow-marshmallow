@@ -34,38 +34,54 @@ def copy_containers(errors):
     return errors
 
 
-def merge_errors(errors1, errors2):  # noqa: PLR0911
+def merge_errors(errors1, errors2):
     """Deeply merge two error messages.
 
     The format of ``errors1`` and ``errors2`` matches the ``message``
     parameter of :exc:`marshmallow.exceptions.ValidationError`.
+
+    The merging strategy follows these rules:
+    - If either side is falsy, return the other.
+    - Two dicts: recursively merge by key.
+    - Two lists: concatenate.
+    - One dict, one non-dict: wrap non-dict under the SCHEMA key and merge.
+    - One list, one scalar: append/prepend the scalar to the list.
+    - Two scalars: wrap both in a list.
     """
+    # Early exit for falsy values
     if not errors1:
         return errors2
     if not errors2:
         return errors1
-    if isinstance(errors1, list):
-        if isinstance(errors2, list):
-            errors1.extend(errors2)
-            return errors1
-        if isinstance(errors2, dict):
-            errors2[SCHEMA] = merge_errors(errors1, errors2.get(SCHEMA))
-            return errors2
-        errors1.append(errors2)
+
+    # Both are dicts: recursively merge by key
+    if isinstance(errors1, dict) and isinstance(errors2, dict):
+        for key, val in errors2.items():
+            if key in errors1:
+                errors1[key] = merge_errors(errors1[key], val)
+            else:
+                errors1[key] = val
         return errors1
+
+    # Both are lists: concatenate
+    if isinstance(errors1, list) and isinstance(errors2, list):
+        errors1.extend(errors2)
+        return errors1
+
+    # One is dict, other is non-dict: put non-dict under SCHEMA key and merge
     if isinstance(errors1, dict):
-        if isinstance(errors2, dict):
-            for key, val in errors2.items():
-                if key in errors1:
-                    errors1[key] = merge_errors(errors1[key], val)
-                else:
-                    errors1[key] = val
-            return errors1
         errors1[SCHEMA] = merge_errors(errors1.get(SCHEMA), errors2)
         return errors1
-    if isinstance(errors2, list):
-        return [errors1, *errors2]
     if isinstance(errors2, dict):
         errors2[SCHEMA] = merge_errors(errors1, errors2.get(SCHEMA))
         return errors2
+
+    # Neither is a dict. Handle list + scalar and scalar + scalar combinations.
+    if isinstance(errors1, list):
+        errors1.append(errors2)
+        return errors1
+    if isinstance(errors2, list):
+        return [errors1, *errors2]
+
+    # Both are scalars (strings, custom error objects, etc.)
     return [errors1, errors2]

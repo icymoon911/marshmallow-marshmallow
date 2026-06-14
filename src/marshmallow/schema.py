@@ -620,90 +620,154 @@ class Schema(metaclass=SchemaMeta):
         :return: The deserialized data as `dict_class` instance or list of `dict_class`
         instances if `many` is `True`.
         """
-        index_errors = self.opts.index_errors
-        index = index if index_errors else None
+        index = index if self.opts.index_errors else None
         if many:
-            if not is_sequence_but_not_string(data):
-                error_store.store_error([self.error_messages["type"]], index=index)
-                ret_l = []
-            else:
-                ret_l = [
-                    self._deserialize(
-                        d,
-                        error_store=error_store,
-                        many=False,
-                        partial=partial,
-                        unknown=unknown,
-                        index=idx,
-                    )
-                    for idx, d in enumerate(data)
-                ]
-            return ret_l
+            return self._deserialize_many(
+                data,
+                error_store=error_store,
+                partial=partial,
+                unknown=unknown,
+                index=index,
+            )
+        return self._deserialize_single(
+            data,
+            error_store=error_store,
+            partial=partial,
+            unknown=unknown,
+            index=index,
+        )
+
+    def _deserialize_many(
+        self,
+        data: Sequence[Mapping[str, typing.Any]],
+        *,
+        error_store: ErrorStore,
+        partial,
+        unknown: types.UnknownOption,
+        index: int | None,
+    ) -> list[typing.Any]:
+        """Deserialize a collection of items.
+
+        :param data: The collection to deserialize.
+        :param error_store: Structure to store errors.
+        :param partial: Partial loading option.
+        :param unknown: Unknown field handling option.
+        :param index: Index for error reporting (used only for type error on the collection itself).
+        :return: A list of deserialized items.
+        """
+        if not is_sequence_but_not_string(data):
+            error_store.store_error([self.error_messages["type"]], index=index)
+            return []
+        return [
+            self._deserialize_single(
+                d,
+                error_store=error_store,
+                partial=partial,
+                unknown=unknown,
+                index=(idx if self.opts.index_errors else None),
+            )
+            for idx, d in enumerate(data)
+        ]
+
+    def _deserialize_single(
+        self,
+        data: Mapping[str, typing.Any],
+        *,
+        error_store: ErrorStore,
+        partial,
+        unknown: types.UnknownOption,
+        index: int | None,
+    ) -> typing.Any:
+        """Deserialize a single mapping.
+
+        :param data: The mapping to deserialize.
+        :param error_store: Structure to store errors.
+        :param partial: Partial loading option.
+        :param unknown: Unknown field handling option.
+        :param index: Index for error reporting.
+        :return: A dict_class instance with the deserialized data.
+        """
         ret_d = self.dict_class()
+
         # Check data is a dict
         if not isinstance(data, Mapping):
             error_store.store_error([self.error_messages["type"]], index=index)
-        else:
-            partial_is_collection = is_collection(partial)
-            for attr_name, field_obj in self.load_fields.items():
-                field_name = (
-                    field_obj.data_key if field_obj.data_key is not None else attr_name
-                )
-                raw_value = data.get(field_name, missing)
-                if raw_value is missing:
-                    # Ignore missing field if we're allowed to.
-                    if partial is True or (
-                        partial_is_collection and attr_name in partial
-                    ):
-                        continue
-                d_kwargs = {}
-                # Allow partial loading of nested schemas.
-                if partial_is_collection:
-                    prefix = attr_name + "."
-                    len_prefix = len(prefix)
-                    sub_partial = [
-                        f[len_prefix:] for f in partial if f.startswith(prefix)
-                    ]
-                    d_kwargs["partial"] = sub_partial
-                elif partial is not None:
-                    d_kwargs["partial"] = partial
+            return ret_d
 
-                def getter(
-                    val, field_obj=field_obj, field_name=field_name, d_kwargs=d_kwargs
-                ):
-                    return field_obj.deserialize(
-                        val,
-                        field_name,
-                        data,
-                        **d_kwargs,
-                    )
+        partial_is_collection = is_collection(partial)
+        for attr_name, field_obj in self.load_fields.items():
+            field_name = (
+                field_obj.data_key if field_obj.data_key is not None else attr_name
+            )
+            raw_value = data.get(field_name, missing)
+            if raw_value is missing:
+                # Ignore missing field if we're allowed to.
+                if partial is True or (partial_is_collection and attr_name in partial):
+                    continue
 
-                value = self._call_and_store(
-                    getter_func=getter,
-                    data=raw_value,
-                    field_name=field_name,
-                    error_store=error_store,
-                    index=index,
-                )
-                if value is not missing:
-                    key = field_obj.attribute or attr_name
-                    set_value(ret_d, key, value)
-            if unknown != EXCLUDE:
-                fields = {
-                    field_obj.data_key if field_obj.data_key is not None else field_name
-                    for field_name, field_obj in self.load_fields.items()
-                }
-                for key in set(data) - fields:
-                    value = data[key]
-                    if unknown == INCLUDE:
-                        ret_d[key] = value
-                    elif unknown == RAISE:
-                        error_store.store_error(
-                            [self.error_messages["unknown"]],
-                            key,
-                            (index if index_errors else None),
-                        )
+            # Build kwargs for nested partial loading
+            d_kwargs: dict[str, typing.Any] = {}
+            if partial_is_collection:
+                prefix = attr_name + "."
+                len_prefix = len(prefix)
+                sub_partial = [f[len_prefix:] for f in partial if f.startswith(prefix)]
+                d_kwargs["partial"] = sub_partial
+            elif partial is not None:
+                d_kwargs["partial"] = partial
+
+            def getter(
+                val, field_obj=field_obj, field_name=field_name, d_kwargs=d_kwargs
+            ):
+                return field_obj.deserialize(val, field_name, data, **d_kwargs)
+
+            value = self._call_and_store(
+                getter_func=getter,
+                data=raw_value,
+                field_name=field_name,
+                error_store=error_store,
+                index=index,
+            )
+            if value is not missing:
+                key = field_obj.attribute or attr_name
+                set_value(ret_d, key, value)
+
+        # Handle unknown fields
+        if unknown != EXCLUDE:
+            self._handle_unknown_fields(data, ret_d, error_store, unknown, index)
+
         return ret_d
+
+    def _handle_unknown_fields(
+        self,
+        data: Mapping[str, typing.Any],
+        ret_d: typing.Any,
+        error_store: ErrorStore,
+        unknown: types.UnknownOption,
+        index: int | None,
+    ) -> None:
+        """Handle fields in data that are not defined in the schema.
+
+        :param data: The original input data.
+        :param ret_d: The deserialized result dict to potentially add unknown fields to.
+        :param error_store: Structure to store errors (for RAISE mode).
+        :param unknown: How to handle unknown fields (INCLUDE or RAISE).
+        :param index: Index for error reporting.
+        """
+        known_fields = {
+            field_obj.data_key if field_obj.data_key is not None else field_name
+            for field_name, field_obj in self.load_fields.items()
+        }
+        index_errors = self.opts.index_errors
+        for key in set(data) - known_fields:
+            value = data[key]
+            if unknown == INCLUDE:
+                ret_d[key] = value
+            elif unknown == RAISE:
+                error_store.store_error(
+                    [self.error_messages["unknown"]],
+                    key,
+                    (index if index_errors else None),
+                )
 
     def load(
         self,
@@ -771,6 +835,55 @@ class Schema(metaclass=SchemaMeta):
         data = self.opts.render_module.loads(s, **kwargs)
         return self.load(data, many=many, partial=partial, unknown=unknown)
 
+    def _resolve_validator_error_key(self, field_name: str) -> str:
+        """Resolve a field name from a ValidationError to its data_key for error storage.
+
+        Schema-level validators can raise ValidationError with a field_name that
+        needs to be mapped to the corresponding data_key in the output.
+
+        :param field_name: The field name from the ValidationError.
+        :return: The resolved data_key to use for error storage.
+        """
+        if field_name == SCHEMA:
+            return SCHEMA
+        field_obj: Field | None = None
+        try:
+            field_obj = self.fields[field_name]
+        except KeyError:
+            if field_name in self.declared_fields:
+                field_obj = self.declared_fields[field_name]
+        if field_obj:
+            return field_obj.data_key if field_obj.data_key is not None else field_name
+        return field_name
+
+    @staticmethod
+    def _run_validator_safe(
+        func: typing.Callable,
+        *args: typing.Any,
+        error_store: ErrorStore,
+        error_key: str,
+        index: int | None = None,
+        **kwargs: typing.Any,
+    ) -> typing.Any:
+        """Call a validator function, catching and storing any ValidationError.
+
+        This is a generic helper that wraps the try/except pattern common to
+        field-level and schema-level validator invocation.
+
+        :param func: The validator callable.
+        :param args: Positional arguments to pass to the validator.
+        :param error_store: Structure to store errors.
+        :param error_key: The key under which to store any validation errors.
+        :param index: Index for error reporting (for collection items).
+        :param kwargs: Keyword arguments to pass to the validator.
+        :return: The validator's return value, or `missing` if validation failed.
+        """
+        try:
+            return func(*args, **kwargs)
+        except ValidationError as err:
+            error_store.store_error(err.messages, error_key, index=index)
+            return missing
+
     def _run_validator(
         self,
         validator_func: types.SchemaValidator,
@@ -784,33 +897,14 @@ class Schema(metaclass=SchemaMeta):
         pass_original: bool,
         index: int | None = None,
     ):
+        if pass_original:  # Pass original, raw data (before unmarshalling)
+            args = (output, original_data)
+        else:
+            args = (output,)
         try:
-            if pass_original:  # Pass original, raw data (before unmarshalling)
-                validator_func(
-                    output, original_data, partial=partial, many=many, unknown=unknown
-                )
-            else:
-                validator_func(output, partial=partial, many=many, unknown=unknown)
+            validator_func(*args, partial=partial, many=many, unknown=unknown)
         except ValidationError as err:
-            field_name = err.field_name
-            data_key: str
-            if field_name == SCHEMA:
-                data_key = SCHEMA
-            else:
-                field_obj: Field | None = None
-                try:
-                    field_obj = self.fields[field_name]
-                except KeyError:
-                    if field_name in self.declared_fields:
-                        field_obj = self.declared_fields[field_name]
-                if field_obj:
-                    data_key = (
-                        field_obj.data_key
-                        if field_obj.data_key is not None
-                        else field_name
-                    )
-                else:
-                    data_key = field_name
+            data_key = self._resolve_validator_error_key(err.field_name)
             error_store.store_error(err.messages, data_key, index=index)
 
     def validate(
@@ -852,6 +946,10 @@ class Schema(metaclass=SchemaMeta):
         """Deserialize `data`, returning the deserialized result.
         This method is private API.
 
+        This method acts as an orchestrator, calling each pipeline stage in
+        sequence: pre_load → deserialize → field_validators → schema_validators
+        → post_load.
+
         :param data: The data to deserialize.
         :param many: Whether to deserialize `data` as a collection. If `None`, the
             value for `self.many` is used.
@@ -862,7 +960,7 @@ class Schema(metaclass=SchemaMeta):
         :param unknown: Whether to exclude, include, or raise an error for unknown
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
             If `None`, the value for `self.unknown` is used.
-        :param postprocess: Whether to run post_load methods..
+        :param postprocess: Whether to run post_load methods.
         :return: Deserialized data
         """
         error_store = ErrorStore()
@@ -871,78 +969,195 @@ class Schema(metaclass=SchemaMeta):
         unknown = self.unknown if unknown is None else unknown
         if partial is None:
             partial = self.partial
-        # Run preprocessors
-        if self._hooks[PRE_LOAD]:
-            try:
-                processed_data = self._invoke_load_processors(
-                    PRE_LOAD,
-                    data,
-                    many=many,
-                    original_data=data,
-                    partial=partial,
-                    unknown=unknown,
-                )
-            except ValidationError as err:
-                errors = err.normalized_messages()
-                result: list | dict | None = None
+
+        # Stage 1: Run pre_load processors
+        try:
+            processed_data = self._run_pre_load(
+                data, many=many, partial=partial, unknown=unknown
+            )
+        except ValidationError as err:
+            errors = err.normalized_messages()
+            result: list | dict | None = None
         else:
-            processed_data = data
-        if not errors:
-            # Deserialize data
-            result = self._deserialize(
+            # Stage 2: Deserialize data
+            result = self._run_deserialize(
                 processed_data,
-                error_store=error_store,
+                error_store,
                 many=many,
                 partial=partial,
                 unknown=unknown,
             )
-            # Run field-level validation
-            self._invoke_field_validators(
-                error_store=error_store, data=result, many=many
+
+            # Stage 3: Run field-level validators
+            self._run_field_validators(error_store=error_store, data=result, many=many)
+
+            # Stage 4: Run schema-level validators
+            self._run_schema_validators(
+                error_store=error_store,
+                data=result,
+                original_data=data,
+                many=many,
+                partial=partial,
+                unknown=unknown,
             )
-            # Run schema-level validation
-            if self._hooks[VALIDATES_SCHEMA]:
-                field_errors = bool(error_store.errors)
-                self._invoke_schema_validators(
-                    error_store=error_store,
-                    pass_collection=True,
-                    data=result,
-                    original_data=data,
-                    many=many,
-                    partial=partial,
-                    unknown=unknown,
-                    field_errors=field_errors,
-                )
-                self._invoke_schema_validators(
-                    error_store=error_store,
-                    pass_collection=False,
-                    data=result,
-                    original_data=data,
-                    many=many,
-                    partial=partial,
-                    unknown=unknown,
-                    field_errors=field_errors,
-                )
+
             errors = error_store.errors
-            # Run post processors
+
+            # Stage 5: Run post_load processors (only if no errors)
             if not errors and postprocess and self._hooks[POST_LOAD]:
                 try:
-                    result = self._invoke_load_processors(
-                        POST_LOAD,
-                        result,
-                        many=many,
-                        original_data=data,
-                        partial=partial,
-                        unknown=unknown,
+                    result = self._run_post_load(
+                        result, data, many=many, partial=partial, unknown=unknown
                     )
                 except ValidationError as err:
                     errors = err.normalized_messages()
+
+        # Raise if any errors were collected
         if errors:
             exc = ValidationError(errors, data=data, valid_data=result)
             self.handle_error(exc, data, many=many, partial=partial)
             raise exc
 
         return result
+
+    def _run_pre_load(
+        self,
+        data: Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]],
+        *,
+        many: bool,
+        partial: bool | types.StrSequenceOrSet | None,
+        unknown: types.UnknownOption,
+    ) -> Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]]:
+        """Run pre_load processors on the input data.
+
+        :param data: The raw input data.
+        :param many: Whether data is a collection.
+        :param partial: Partial loading option.
+        :param unknown: Unknown field handling option.
+        :return: The processed data.
+        :raises ValidationError: If a processor raises a validation error.
+        """
+        if not self._hooks[PRE_LOAD]:
+            return data
+        return self._invoke_load_processors(
+            PRE_LOAD,
+            data,
+            many=many,
+            original_data=data,
+            partial=partial,
+            unknown=unknown,
+        )
+
+    def _run_deserialize(
+        self,
+        data: Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]],
+        error_store: ErrorStore,
+        *,
+        many: bool,
+        partial: bool | types.StrSequenceOrSet | None,
+        unknown: types.UnknownOption,
+    ) -> typing.Any:
+        """Run deserialization on the pre-processed data.
+
+        :param data: The data to deserialize.
+        :param error_store: Structure to store errors.
+        :param many: Whether data is a collection.
+        :param partial: Partial loading option.
+        :param unknown: Unknown field handling option.
+        :return: The deserialized data.
+        """
+        return self._deserialize(
+            data,
+            error_store=error_store,
+            many=many,
+            partial=partial,
+            unknown=unknown,
+        )
+
+    def _run_field_validators(
+        self, error_store: ErrorStore, *, data, many: bool
+    ) -> None:
+        """Run field-level validators on the deserialized data.
+
+        :param error_store: Structure to store errors.
+        :param data: The deserialized data to validate.
+        :param many: Whether data is a collection.
+        """
+        self._invoke_field_validators(error_store=error_store, data=data, many=many)
+
+    def _run_schema_validators(
+        self,
+        error_store: ErrorStore,
+        *,
+        data,
+        original_data,
+        many: bool,
+        partial: bool | types.StrSequenceOrSet | None,
+        unknown: types.UnknownOption,
+    ) -> None:
+        """Run schema-level validators on the deserialized data.
+
+        Schema validators run in two passes: first those with ``pass_collection=True``,
+        then those with ``pass_collection=False``.
+
+        :param error_store: Structure to store errors.
+        :param data: The deserialized data to validate.
+        :param original_data: The original input data (before pre_load).
+        :param many: Whether data is a collection.
+        :param partial: Partial loading option.
+        :param unknown: Unknown field handling option.
+        """
+        if not self._hooks[VALIDATES_SCHEMA]:
+            return
+        field_errors = bool(error_store.errors)
+        self._invoke_schema_validators(
+            error_store=error_store,
+            pass_collection=True,
+            data=data,
+            original_data=original_data,
+            many=many,
+            partial=partial,
+            unknown=unknown,
+            field_errors=field_errors,
+        )
+        self._invoke_schema_validators(
+            error_store=error_store,
+            pass_collection=False,
+            data=data,
+            original_data=original_data,
+            many=many,
+            partial=partial,
+            unknown=unknown,
+            field_errors=field_errors,
+        )
+
+    def _run_post_load(
+        self,
+        result,
+        data: Mapping[str, typing.Any] | Sequence[Mapping[str, typing.Any]],
+        *,
+        many: bool,
+        partial: bool | types.StrSequenceOrSet | None,
+        unknown: types.UnknownOption,
+    ):
+        """Run post_load processors on the validated data.
+
+        :param result: The validated deserialized data.
+        :param data: The original input data.
+        :param many: Whether data is a collection.
+        :param partial: Partial loading option.
+        :param unknown: Unknown field handling option.
+        :return: The post-processed data.
+        :raises ValidationError: If a processor raises a validation error.
+        """
+        return self._invoke_load_processors(
+            POST_LOAD,
+            result,
+            many=many,
+            original_data=data,
+            partial=partial,
+            unknown=unknown,
+        )
 
     def _normalize_nested_options(self) -> None:
         """Apply then flatten nested schema options.
@@ -1148,11 +1363,11 @@ class Schema(metaclass=SchemaMeta):
                         except KeyError:
                             pass
                         else:
-                            validated_value = self._call_and_store(
-                                getter_func=do_validate,
-                                data=value,
-                                field_name=data_key,
+                            validated_value = self._run_validator_safe(
+                                do_validate,
+                                value,
                                 error_store=error_store,
+                                error_key=data_key,
                                 index=(idx if self.opts.index_errors else None),
                             )
                             if validated_value is missing:
@@ -1163,11 +1378,11 @@ class Schema(metaclass=SchemaMeta):
                     except KeyError:
                         pass
                     else:
-                        validated_value = self._call_and_store(
-                            getter_func=do_validate,
-                            data=value,
-                            field_name=data_key,
+                        validated_value = self._run_validator_safe(
+                            do_validate,
+                            value,
                             error_store=error_store,
+                            error_key=data_key,
                         )
                         if validated_value is missing:
                             data.pop(field_name, None)
