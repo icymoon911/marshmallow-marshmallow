@@ -63,7 +63,9 @@ def merge_errors(errors1, errors2):  # noqa: PLR0911
             return errors1
         errors1[SCHEMA] = merge_errors(errors1.get(SCHEMA), errors2)
         return errors1
+    # errors1 is a string/scalar
     if isinstance(errors2, list):
+        # errors1 is a string; prepend it as a schema-level message in the list
         return [errors1, *errors2]
     if isinstance(errors2, dict):
         errors2[SCHEMA] = merge_errors(errors1, errors2.get(SCHEMA))

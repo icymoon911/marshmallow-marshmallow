@@ -909,7 +909,13 @@ class TestFieldDeserialization:
             "foo": {"value": {0: ["Not a valid string."], 1: ["Not a valid string."]}},
             "bar": {"value": ["Not a valid list."]},
         }
-        assert excinfo.value.valid_data == {"foo": [], "ham": ["spam"]}
+        # valid_data preserves index correspondence with None placeholders for
+        # failed items, and includes keys whose values failed entirely.
+        assert excinfo.value.valid_data == {
+            "foo": [None, None],
+            "bar": None,
+            "ham": ["spam"],
+        }
 
     def test_structured_dict_key_deserialization(self):
         field = fields.Dict(keys=fields.Str)
@@ -939,7 +945,7 @@ class TestFieldDeserialization:
         assert excinfo.value.args[0] == {
             "foo@test.com": {"value": ["Not a valid number."]}
         }
-        assert excinfo.value.valid_data == {}
+        assert excinfo.value.valid_data == {"foo@test.com": None}
         with pytest.raises(ValidationError) as excinfo:
             field.deserialize({1: 1})
         assert excinfo.value.args[0] == {1: {"key": ["Not a valid string."]}}

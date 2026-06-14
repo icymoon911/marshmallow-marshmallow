@@ -61,6 +61,24 @@ def _get_fields(attrs) -> list[tuple[str, Field]]:
     return ret
 
 
+def _filter_missing(value):
+    """Recursively filter out ``missing`` sentinels from a value.
+
+    - If ``value`` itself is ``missing``, return ``missing``.
+    - If ``value`` is a dict, remove keys whose values are ``missing``.
+    - If ``value`` is a list, remove ``missing`` elements.
+    - Otherwise return ``value`` unchanged.
+    """
+    if value is missing:
+        return missing
+    if isinstance(value, Mapping):
+        cleaned = {k: _filter_missing(v) for k, v in value.items()}
+        return {k: v for k, v in cleaned.items() if v is not missing}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [v for v in (_filter_missing(item) for item in value) if v is not missing]
+    return value
+
+
 # This function allows Schemas to inherit from non-Schema classes and ensures
 #   inheritance according to the MRO
 def _get_fields_by_mro(klass: SchemaMeta):
@@ -696,7 +714,12 @@ class Schema(metaclass=SchemaMeta):
                 for key in set(data) - fields:
                     value = data[key]
                     if unknown == INCLUDE:
-                        ret_d[key] = value
+                        # Filter out `missing` sentinels that may have been
+                        # introduced by pre_load processors, so they don't
+                        # leak into the deserialized output.
+                        filtered = _filter_missing(value)
+                        if filtered is not missing:
+                            ret_d[key] = filtered
                     elif unknown == RAISE:
                         error_store.store_error(
                             [self.error_messages["unknown"]],
@@ -798,11 +821,13 @@ class Schema(metaclass=SchemaMeta):
                 data_key = SCHEMA
             else:
                 field_obj: Field | None = None
-                try:
+                if field_name in self.fields:
                     field_obj = self.fields[field_name]
-                except KeyError:
-                    if field_name in self.declared_fields:
-                        field_obj = self.declared_fields[field_name]
+                elif field_name in self.declared_fields:
+                    # Field exists in declared_fields but was excluded from
+                    # active fields (e.g. by only/exclude). Use declared_fields
+                    # to resolve the correct data_key for error reporting.
+                    field_obj = self.declared_fields[field_name]
                 if field_obj:
                     data_key = (
                         field_obj.data_key

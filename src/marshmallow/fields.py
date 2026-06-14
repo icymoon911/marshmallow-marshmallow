@@ -643,7 +643,10 @@ class Nested(Field):
             valid_data = self.schema.load(value, unknown=self.unknown, partial=partial)
         except ValidationError as error:
             raise ValidationError(
-                error.messages, valid_data=error.valid_data
+                error.messages,
+                valid_data=error.valid_data,
+                data=error.data,
+                **error.kwargs,
             ) from error
         return valid_data
 
@@ -789,6 +792,10 @@ class List(Field[list[_InternalT | None]]):
             except ValidationError as error:
                 if error.valid_data is not None:
                     result.append(typing.cast("_InternalT", error.valid_data))
+                else:
+                    # Preserve index correspondence when valid_data is unavailable
+                    # (e.g. a Nested field that produced no partial data).
+                    result.append(None)
                 errors.update({idx: error.messages})
         if errors:
             raise ValidationError(errors, valid_data=result)
@@ -884,6 +891,9 @@ class Tuple(Field[tuple]):
             except ValidationError as error:
                 if error.valid_data is not None:
                     result.append(error.valid_data)
+                else:
+                    # Preserve index correspondence when valid_data is unavailable.
+                    result.append(None)
                 errors.update({idx: error.messages})
         if errors:
             raise ValidationError(errors, valid_data=result)
@@ -1714,8 +1724,12 @@ class Mapping(Field[_MappingT], metaclass=abc.ABCMeta):
                     deser_val = self.value_field.deserialize(val, **kwargs)
                 except ValidationError as error:
                     errors[key]["value"] = error.messages
-                    if error.valid_data is not None and key in keys:
-                        result[keys[key]] = error.valid_data
+                    if key in keys:
+                        if error.valid_data is not None:
+                            result[keys[key]] = error.valid_data
+                        else:
+                            # Preserve key in result with None placeholder
+                            result[keys[key]] = None
                 else:
                     if key in keys:
                         result[keys[key]] = deser_val
