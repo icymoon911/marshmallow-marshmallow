@@ -49,7 +49,10 @@ def merge_errors(errors1, errors2):  # noqa: PLR0911
             errors1.extend(errors2)
             return errors1
         if isinstance(errors2, dict):
-            errors2[SCHEMA] = merge_errors(errors1, errors2.get(SCHEMA))
+            if SCHEMA in errors2:
+                errors2[SCHEMA] = merge_errors(errors1, errors2[SCHEMA])
+            else:
+                errors2[SCHEMA] = copy_containers(errors1)
             return errors2
         errors1.append(errors2)
         return errors1
@@ -61,11 +64,17 @@ def merge_errors(errors1, errors2):  # noqa: PLR0911
                 else:
                     errors1[key] = val
             return errors1
-        errors1[SCHEMA] = merge_errors(errors1.get(SCHEMA), errors2)
+        if SCHEMA in errors1:
+            errors1[SCHEMA] = merge_errors(errors1[SCHEMA], errors2)
+        else:
+            errors1[SCHEMA] = copy_containers(errors2)
         return errors1
     if isinstance(errors2, list):
         return [errors1, *errors2]
     if isinstance(errors2, dict):
-        errors2[SCHEMA] = merge_errors(errors1, errors2.get(SCHEMA))
+        if SCHEMA in errors2:
+            errors2[SCHEMA] = merge_errors(errors1, errors2[SCHEMA])
+        else:
+            errors2[SCHEMA] = copy_containers(errors1)
         return errors2
     return [errors1, errors2]

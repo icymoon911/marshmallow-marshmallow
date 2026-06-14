@@ -222,6 +222,26 @@ class SchemaOpts:
         self.many = getattr(meta, "many", False)
 
 
+def _filter_missing(value):
+    """Recursively filter out ``missing`` sentinel values from a data structure.
+
+    Used when ``unknown=INCLUDE`` to prevent ``missing`` sentinels from
+    leaking into the deserialized output.
+    """
+    if value is missing:
+        return missing
+    if isinstance(value, Mapping):
+        return {
+            k: _filter_missing(v)
+            for k, v in value.items()
+            if v is not missing
+        }
+    if isinstance(value, (list, tuple)):
+        filtered = [_filter_missing(item) for item in value]
+        return type(value)(item for item in filtered if item is not missing)
+    return value
+
+
 class Schema(metaclass=SchemaMeta):
     """Base schema class with which to define schemas.
 
@@ -696,7 +716,9 @@ class Schema(metaclass=SchemaMeta):
                 for key in set(data) - fields:
                     value = data[key]
                     if unknown == INCLUDE:
-                        ret_d[key] = value
+                        filtered_value = _filter_missing(value)
+                        if filtered_value is not missing:
+                            ret_d[key] = filtered_value
                     elif unknown == RAISE:
                         error_store.store_error(
                             [self.error_messages["unknown"]],
@@ -797,18 +819,13 @@ class Schema(metaclass=SchemaMeta):
             if field_name == SCHEMA:
                 data_key = SCHEMA
             else:
-                field_obj: Field | None = None
-                try:
-                    field_obj = self.fields[field_name]
-                except KeyError:
-                    if field_name in self.declared_fields:
-                        field_obj = self.declared_fields[field_name]
-                if field_obj:
-                    data_key = (
-                        field_obj.data_key
-                        if field_obj.data_key is not None
-                        else field_name
-                    )
+                # Look up field in active fields first, then fall back to
+                # declared_fields for fields excluded by only/exclude.
+                field_obj: Field | None = self.fields.get(field_name)
+                if field_obj is None:
+                    field_obj = self.declared_fields.get(field_name)
+                if field_obj is not None and field_obj.data_key is not None:
+                    data_key = field_obj.data_key
                 else:
                     data_key = field_name
             error_store.store_error(err.messages, data_key, index=index)

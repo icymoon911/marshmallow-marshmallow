@@ -909,7 +909,8 @@ class TestFieldDeserialization:
             "foo": {"value": {0: ["Not a valid string."], 1: ["Not a valid string."]}},
             "bar": {"value": ["Not a valid list."]},
         }
-        assert excinfo.value.valid_data == {"foo": [], "ham": ["spam"]}
+        # valid_data preserves index alignment: None placeholders for failed items
+        assert excinfo.value.valid_data == {"foo": [None, None], "ham": ["spam"]}
 
     def test_structured_dict_key_deserialization(self):
         field = fields.Dict(keys=fields.Str)

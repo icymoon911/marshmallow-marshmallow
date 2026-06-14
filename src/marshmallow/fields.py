@@ -643,7 +643,10 @@ class Nested(Field):
             valid_data = self.schema.load(value, unknown=self.unknown, partial=partial)
         except ValidationError as error:
             raise ValidationError(
-                error.messages, valid_data=error.valid_data
+                error.messages,
+                valid_data=error.valid_data,
+                data=error.data,
+                **error.kwargs,
             ) from error
         return valid_data
 
@@ -787,8 +790,9 @@ class List(Field[list[_InternalT | None]]):
             try:
                 result.append(self.inner.deserialize(each, **kwargs))
             except ValidationError as error:
-                if error.valid_data is not None:
-                    result.append(typing.cast("_InternalT", error.valid_data))
+                # Always append valid_data (even if None) to preserve index
+                # alignment between input and result lists.
+                result.append(typing.cast("_InternalT", error.valid_data))
                 errors.update({idx: error.messages})
         if errors:
             raise ValidationError(errors, valid_data=result)
@@ -882,8 +886,9 @@ class Tuple(Field[tuple]):
             try:
                 result.append(field.deserialize(each, **kwargs))
             except ValidationError as error:
-                if error.valid_data is not None:
-                    result.append(error.valid_data)
+                # Always append valid_data (even if None) to preserve index
+                # alignment between input and result tuples.
+                result.append(error.valid_data)
                 errors.update({idx: error.messages})
         if errors:
             raise ValidationError(errors, valid_data=result)
