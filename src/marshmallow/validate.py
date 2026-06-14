@@ -71,9 +71,13 @@ class And(Validator):
     def __call__(self, value: typing.Any) -> typing.Any:
         errors: list[str | dict] = []
         kwargs: dict[str, typing.Any] = {}
+        current_value = value
         for validator in self.validators:
             try:
-                validator(value)
+                result = validator(current_value)
+                # Chain: pass the (possibly transformed) result to the next validator
+                if result is not None:
+                    current_value = result
             except ValidationError as err:
                 kwargs.update(err.kwargs)
                 if isinstance(err.messages, dict):
@@ -82,7 +86,7 @@ class And(Validator):
                     errors.extend(err.messages)
         if errors:
             raise ValidationError(errors, **kwargs)
-        return value
+        return current_value
 
 
 class URL(Validator):
