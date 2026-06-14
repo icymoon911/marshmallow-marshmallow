@@ -753,3 +753,138 @@ class TestFieldPreAndPostLoad:
             match="The 'post_load' parameter must be a callable or an iterable of callables.",
         ):
             fields.Int(post_load="not_callable")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# PhoneNumber field tests
+# ---------------------------------------------------------------------------
+
+
+class TestPhoneNumberField:
+    """Tests for ``fields.PhoneNumber``."""
+
+    def _make_schema(self, **field_kwargs):
+        class PhoneSchema(Schema):
+            phone = fields.PhoneNumber(**field_kwargs)
+
+        return PhoneSchema()
+
+    # -- Valid inputs --------------------------------------------------------
+
+    def test_valid_e164(self):
+        schema = self._make_schema()
+        result = schema.load({"phone": "+8613800138000"})
+        # Deserialization normalises to E.164
+        assert result["phone"] == "+8613800138000"
+
+    def test_valid_e164_us(self):
+        schema = self._make_schema(region="US")
+        result = schema.load({"phone": "+12025551234"})
+        assert result["phone"] == "+12025551234"
+
+    def test_valid_chinese_national(self):
+        schema = self._make_schema()
+        result = schema.load({"phone": "13800138000"})
+        # National number gets auto-prefixed with the region calling code
+        assert result["phone"] == "+8613800138000"
+
+    def test_valid_us_national(self):
+        schema = self._make_schema(region="US")
+        result = schema.load({"phone": "2025551234"})
+        assert result["phone"] == "+12025551234"
+
+    # -- Whitespace / symbol stripping --------------------------------------
+
+    def test_strip_spaces_and_dashes(self):
+        schema = self._make_schema()
+        result = schema.load({"phone": "+86 138-0013-8000"})
+        assert result["phone"] == "+8613800138000"
+
+    def test_strip_parentheses_and_dots(self):
+        schema = self._make_schema(region="US")
+        result = schema.load({"phone": "(202) 555.1234"})
+        assert result["phone"] == "+12025551234"
+
+    def test_strip_national_with_spaces(self):
+        schema = self._make_schema()
+        result = schema.load({"phone": "138 0013 8000"})
+        assert result["phone"] == "+8613800138000"
+
+    # -- Invalid inputs -----------------------------------------------------
+
+    def test_invalid_too_short(self):
+        schema = self._make_schema()
+        with pytest.raises(ValidationError):
+            schema.load({"phone": "1380013"})  # only 7 digits, CN expects 11
+
+    def test_invalid_too_long(self):
+        schema = self._make_schema()
+        with pytest.raises(ValidationError):
+            schema.load({"phone": "1380013800099"})  # 13 digits, CN expects 11
+
+    def test_invalid_contains_letters(self):
+        schema = self._make_schema()
+        with pytest.raises(ValidationError):
+            schema.load({"phone": "+861380013800a"})
+
+    def test_invalid_wrong_leading_digit_cn(self):
+        schema = self._make_schema()
+        with pytest.raises(ValidationError):
+            schema.load({"phone": "23800138000"})  # CN must start with '1'
+
+    def test_invalid_not_a_string(self):
+        schema = self._make_schema()
+        with pytest.raises(ValidationError):
+            schema.load({"phone": 13800138000})  # int, not str
+
+    # -- Serialization format -----------------------------------------------
+
+    def test_serialize_default_returns_stored_value(self):
+        schema = self._make_schema()
+        result = schema.dump({"phone": "+8613800138000"})
+        assert result["phone"] == "+8613800138000"
+
+    def test_serialize_e164_format(self):
+        schema = self._make_schema(format="e164")
+        result = schema.dump({"phone": "+8613800138000"})
+        assert result["phone"] == "+8613800138000"
+
+    def test_serialize_national_format_cn(self):
+        schema = self._make_schema(format="national")
+        result = schema.dump({"phone": "+8613800138000"})
+        assert result["phone"] == "138 0013 8000"
+
+    def test_serialize_national_format_us(self):
+        schema = self._make_schema(region="US", format="national")
+        result = schema.dump({"phone": "+12025551234"})
+        assert result["phone"] == "(202) 555-1234"
+
+    def test_serialize_none(self):
+        schema = self._make_schema(allow_none=True, format="e164")
+        result = schema.dump({"phone": None})
+        assert result["phone"] is None
+
+    # -- Error messages -----------------------------------------------------
+
+    def test_custom_invalid_error_message(self):
+        schema = self._make_schema(error_messages={"invalid": "Bad phone!"})
+        with pytest.raises(ValidationError) as exc:
+            schema.load({"phone": "abc"})
+        assert "Bad phone!" in str(exc.value.messages)
+
+    def test_invalid_region_error(self):
+        schema = self._make_schema(region="ZZ")  # unknown region
+        with pytest.raises(ValidationError) as exc:
+            schema.load({"phone": "1234567890"})
+        assert "region" in str(exc.value.messages).lower() or "ZZ" in str(
+            exc.value.messages
+        )
+
+    # -- Region parameter ---------------------------------------------------
+
+    def test_region_hk(self):
+        schema = self._make_schema(region="HK", format="national")
+        result = schema.load({"phone": "98765432"})
+        assert result["phone"] == "+85298765432"
+        dumped = schema.dump({"phone": "+85298765432"})
+        assert dumped["phone"] == "9876 5432"

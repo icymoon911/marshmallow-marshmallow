@@ -10,6 +10,7 @@ import email.utils
 import ipaddress
 import math
 import numbers
+import re
 import typing
 import uuid
 from collections.abc import Mapping as _Mapping
@@ -72,6 +73,7 @@ __all__ = [
     "Nested",
     "Number",
     "Pluck",
+    "PhoneNumber",
     "Raw",
     "Str",
     "String",
@@ -1800,6 +1802,176 @@ class Email(String):
             raise ValueError('"invalid" error message must be a string.')
         validator = validate.Email(error=self.error_messages["invalid"])
         self.validators.insert(0, validator)
+
+
+# Characters stripped from phone number input before validation.
+_PHONE_STRIP_RE = re.compile(r"[\s\-\(\)\.\+]+")
+
+
+class PhoneNumber(String):
+    """A phone number field.
+
+    Deserializes phone numbers in E.164 international format or national
+    (domestic) format. Before validation, whitespace, dashes, parentheses, and
+    dots are automatically stripped from the input, so values like
+    ``"+86 138-0013-8000"`` are accepted and normalised to ``"+8613800138000"``.
+
+    When a national number is provided (no leading ``+``), the *region*
+    parameter controls which country's calling code is prepended and which
+    national format rules are applied.
+
+    :param region: The default region code used to interpret national numbers
+        (default ``"CN"``). Used both for validation and for formatting.
+    :param format: Controls the output format during serialization.
+        ``"e164"`` outputs standard international format (e.g.
+        ``"+8613800138000"``); ``"national"`` outputs a human-friendly domestic
+        format (e.g. ``"138 0013 8000"``); ``None`` (the default) outputs the
+        raw stored value with no formatting applied.
+    :param kwargs: The same keyword arguments that :class:`String` receives.
+    """
+
+    #: Default error messages.
+    default_error_messages = {
+        "invalid": "Not a valid phone number.",
+        "invalid_region": "Not a valid phone number for region: {region}.",
+    }
+
+    def __init__(
+        self,
+        *,
+        region: str = "CN",
+        format: str | None = None,  # noqa: A002
+        **kwargs: Unpack[_BaseFieldKwargs],
+    ) -> None:
+        super().__init__(**kwargs)
+        self.region = region.upper()
+        self.format = format
+
+        if not isinstance(self.error_messages["invalid"], str):
+            raise ValueError('"invalid" error message must be a string.')
+
+        validator = validate.Phone(
+            region=self.region,
+            error=self.error_messages["invalid"],
+        )
+        self.validators.insert(0, validator)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _strip_phone(value: str) -> str:
+        """Remove whitespace, dashes, parentheses, dots, and '+' (except the
+        leading '+' used for E.164 international prefix)."""
+        if not value:
+            return value
+        leading_plus = value.lstrip().startswith("+")
+        stripped = _PHONE_STRIP_RE.sub("", value)
+        if leading_plus and not stripped.startswith("+"):
+            stripped = "+" + stripped
+        return stripped
+
+    def _to_e164(self, value: str) -> str:
+        """Convert *value* to E.164 format, prepending the country calling code
+        when *value* is a national number."""
+        if value.startswith("+"):
+            return value
+        calling_code = validate._REGION_CALLING_CODES.get(self.region)
+        if calling_code is None:
+            raise self.make_error("invalid_region", region=self.region)
+        return f"+{calling_code}{value}"
+
+    def _to_national(self, value: str) -> str:
+        """Convert an E.164 or national number to a spaced national display
+        format appropriate for the configured region.
+
+        The implementation provides reasonable grouping for the most common
+        regions; unrecognised regions fall back to returning the digits as-is.
+        """
+        digits = value.lstrip("+")
+
+        # Strip country calling code from E.164 numbers so we can format the
+        # national subscriber portion uniformly.
+        calling_code = validate._REGION_CALLING_CODES.get(self.region)
+        if calling_code and digits.startswith(calling_code):
+            digits = digits[len(calling_code):]
+
+        # Region-specific grouping patterns (national subscriber number).
+        if self.region == "CN" and len(digits) == 11:
+            # 138 0013 8000
+            return f"{digits[:3]} {digits[3:7]} {digits[7:]}"
+        if self.region in ("US", "CA") and len(digits) == 10:
+            # (138) 001-3800
+            return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+        if self.region == "GB" and len(digits) == 10:
+            # 07123 456789
+            return f"{digits[:5]} {digits[5:]}"
+        if self.region == "HK" and len(digits) == 8:
+            # 1234 5678
+            return f"{digits[:4]} {digits[4:]}"
+        if self.region == "TW" and len(digits) == 9:
+            # 912 345 678
+            return f"{digits[:3]} {digits[3:6]} {digits[6:]}"
+        if self.region == "SG" and len(digits) == 8:
+            # 1234 5678
+            return f"{digits[:4]} {digits[4:]}"
+        if self.region == "AU" and len(digits) == 9:
+            # 0412 345 678
+            return f"{digits[:4]} {digits[4:7]} {digits[7:]}"
+        if self.region == "JP" and len(digits) == 10:
+            # 090-1234-5678
+            return f"{digits[:3]}-{digits[3:7]}-{digits[7:]}"
+        if self.region == "KR" and len(digits) == 10:
+            # 010-1234-5678
+            return f"{digits[:3]}-{digits[3:7]}-{digits[7:]}"
+        if self.region == "IN" and len(digits) == 10:
+            # 98765 43210
+            return f"{digits[:5]} {digits[5:]}"
+
+        # Fallback: return raw digits
+        return digits
+
+    # ------------------------------------------------------------------
+    # Serialisation / deserialisation
+    # ------------------------------------------------------------------
+
+    def _deserialize(self, value, attr, data, **kwargs) -> str:
+        # Run String's deserialization first to ensure it's a string.
+        value = super()._deserialize(value, attr, data, **kwargs)
+
+        # Strip formatting characters before validation.
+        cleaned = self._strip_phone(value)
+        if not cleaned:
+            raise self.make_error("invalid")
+
+        # Validate via the Phone validator inserted in __init__.
+        # We call the validators manually so we can surface region errors.
+        region_fmt = validate._REGION_NATIONAL_FORMATS.get(self.region)
+        if region_fmt is None and not cleaned.startswith("+"):
+            raise self.make_error("invalid_region", region=self.region)
+
+        # Let the validator do its job (it will raise ValidationError on failure).
+        for v in self.validators:
+            v(cleaned)
+
+        # Store the normalised E.164 form internally so serialization is consistent.
+        return self._to_e164(cleaned)
+
+    def _serialize(self, value, attr, obj, **kwargs) -> str | None:
+        if value is None:
+            return None
+        # Ensure value is a string (delegate to String's serialize).
+        value = super()._serialize(value, attr, obj, **kwargs)
+        if value is None:
+            return None
+
+        if self.format == "e164":
+            return self._to_e164(value)
+        if self.format == "national":
+            return self._to_national(value)
+        # Default: return as-is
+        return value
 
 
 class IP(Field[ipaddress.IPv4Address | ipaddress.IPv6Address]):

@@ -300,6 +300,112 @@ class Email(Validator):
         return value
 
 
+# Mapping of region codes to country calling codes (subset for common use cases).
+_REGION_CALLING_CODES: dict[str, str] = {
+    "CN": "86",
+    "US": "1",
+    "GB": "44",
+    "JP": "81",
+    "KR": "82",
+    "HK": "852",
+    "TW": "886",
+    "SG": "65",
+    "AU": "61",
+    "DE": "49",
+    "FR": "33",
+    "IN": "91",
+    "RU": "7",
+    "BR": "55",
+    "CA": "1",
+}
+
+# Mapping of region codes to national phone number formats.
+# Each entry: (digit_length, leading_digit_constraint_or_None)
+_REGION_NATIONAL_FORMATS: dict[str, tuple[int, str | None]] = {
+    "CN": (11, "1"),
+    "US": (10, None),
+    "GB": (10, "7"),
+    "JP": (10, None),
+    "KR": (10, "1"),
+    "HK": (8, None),
+    "TW": (9, "9"),
+    "SG": (8, None),
+    "AU": (9, "4"),
+    "DE": (10, "1"),
+    "FR": (9, None),
+    "IN": (10, None),
+    "RU": (10, "9"),
+    "BR": (11, None),
+    "CA": (10, None),
+}
+
+
+class Phone(Validator):
+    """Validate a phone number.
+
+    Supports E.164 international format (starting with ``+``, followed by 7-15
+    digits) and national (domestic) format. When validating a national number,
+    the *region* parameter controls which country's format rules are applied
+    (default ``"CN"`` — 11 digits starting with ``1``).
+
+    :param region: The default region code used to validate national numbers.
+        Must be a key in the internal region table.
+    :param error: Error message to raise in case of a validation error. Can be
+        interpolated with `{input}`.
+
+    Example: ::
+
+        from marshmallow import validate
+
+        validator = validate.Phone()
+        validator("+8613800138000")  # E.164 — valid
+        validator("13800138000")     # CN national — valid
+    """
+
+    # E.164: optional '+' followed by 7–15 digits
+    E164_REGEX = re.compile(r"^\+[0-9]{7,15}\Z")
+
+    default_message = "Not a valid phone number."
+
+    def __init__(self, *, region: str = "CN", error: str | None = None):
+        self.region = region.upper()
+        self.error: str = error or self.default_message
+
+    def _repr_args(self) -> str:
+        return f"region={self.region!r}"
+
+    def _format_error(self, value: str) -> str:
+        return self.error.format(input=value)
+
+    def __call__(self, value: str) -> str:
+        message = self._format_error(value)
+
+        if not value:
+            raise ValidationError(message)
+
+        # E.164 international format
+        if value.startswith("+"):
+            if not self.E164_REGEX.match(value):
+                raise ValidationError(message)
+            return value
+
+        # National format — validate against region rules
+        if not value.isdigit():
+            raise ValidationError(message)
+
+        region_fmt = _REGION_NATIONAL_FORMATS.get(self.region)
+        if region_fmt is None:
+            raise ValidationError(message)
+
+        expected_len, leading = region_fmt
+        if len(value) != expected_len:
+            raise ValidationError(message)
+        if leading is not None and not value.startswith(leading):
+            raise ValidationError(message)
+
+        return value
+
+
 class Range(Validator):
     """Validator which succeeds if the value passed to it is within the specified
     range. If ``min`` is not specified, or is specified as `None`,
